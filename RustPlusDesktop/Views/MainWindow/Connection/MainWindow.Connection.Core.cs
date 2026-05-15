@@ -244,11 +244,6 @@ public partial class MainWindow
             _vm.IsBusy = false;
             _vm.BusyText = "";
 
-            if (TrackingService.AutoLoadShops)
-            {
-                Dispatcher.Invoke(() => ChkShops.IsChecked = true);
-            }
-
             ClearUserOverlayElements();
             _visibleOverlayOwners.Add(_mySteamId);
             LoadOverlayFromDiskForPlayer(_mySteamId);
@@ -274,6 +269,14 @@ public partial class MainWindow
                 PrimeDeviceKindsAsync()
             };
             await Task.WhenAll(initTasks);
+
+            // Shop polling guard requires _worldSizeS / _worldRectPx to be populated, which only
+            // happens after LoadMapAsync() completes. Toggling ChkShops earlier would no-op
+            // silently — see ChkShops_Checked in Map.Shops.cs. So fire it once the map is ready.
+            if (TrackingService.AutoLoadShops)
+            {
+                Dispatcher.Invoke(() => ChkShops.IsChecked = true);
+            }
 
             _vm.NotifyDevicesChanged();
             AppendLog($"Devices rehydrated: {_vm.Selected.Devices?.Count ?? 0}");
