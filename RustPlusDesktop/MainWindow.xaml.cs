@@ -100,9 +100,42 @@ public partial class MainWindow : Window
     private uint? _trackingEntityId; // NEU: ID des Objekts, dem die Kamera folgt
     private IReadOnlyList<RustPlusClientReal.DynMarker>? _lastMarkers; // Cache für Interaktionen
 
+    // Smart Follow Mode: lock the main map camera to a teammate's position (or yourself) so the
+    // map smoothly tracks them between dyn-poll ticks. Set via the team-list context menu; the
+    // AUTO-FOLLOW TRACKING LOGIC in MainWindow.Map.Markers.cs reads these every poll and recenters.
+    private ulong? _followingSteamId;
+    private string _followingPlayerName = "";
+
     public void StopTracking()
     {
         _trackingEntityId = null;
+        if (_followingSteamId.HasValue)
+        {
+            AppendLog($"[follow] stopped following {_followingPlayerName}");
+            _followingSteamId = null;
+            _followingPlayerName = "";
+        }
+    }
+
+    private void StartFollowingPlayer(ulong steamId, string name)
+    {
+        if (steamId == 0) return;
+        _trackingEntityId = null; // can't follow an entity and a player simultaneously
+        _followingSteamId = steamId;
+        _followingPlayerName = name ?? "";
+        AppendLog($"[follow] now following {name} ({steamId})");
+    }
+
+    private void Team_Follow_Click(object sender, RoutedEventArgs e)
+    {
+        var vm = VMFromSender(sender);
+        if (vm == null || vm.SteamId == 0) return;
+
+        // Toggle: same player → stop. Different player → switch target.
+        if (_followingSteamId == vm.SteamId)
+            StopTracking();
+        else
+            StartFollowingPlayer(vm.SteamId, vm.Name ?? "");
     }
 
     // Camera thumbs: Throttling & "in-flight"-Wächter
@@ -1014,6 +1047,21 @@ public partial class MainWindow : Window
         AppendLog($"[items-new] baseDir={baseDir}");
         EnsureNewItemDbLoaded();
         AppendLog($"[items-new] source={sNewDbSource} items={sItemsById.Count} byShort={sItemsByShort.Count}");
+
+        // Background refresh of the Rust item DB. The bundled rust-item-list.json is the fallback;
+        // this overwrites it with the latest from rusthelp.com so new game items are recognized
+        // without waiting for a Ryyott build. Fire-and-forget — failure is silent and harmless.
+        _ = Task.Run(async () =>
+        {
+            if (await TryUpdateItemDbAsync())
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    EnsureNewItemDbLoaded(force: true);
+                    AppendLog($"[items-update] Updated from web. New count: {sItemsById.Count}");
+                });
+            }
+        });
         // GridLayer.RenderTransform = MapTransform;
         // Overlay.RenderTransform   = MapTransform;
         // bei Host-Resize: nur Markerpositionen neu berechnen
@@ -1191,7 +1239,8 @@ public partial class MainWindow : Window
 
         this.Closing += MainWindow_Closing;
         _ = EnsureWebView2Async();
-        ClearAllToggleBusy();
+        try { ClearAllToggleBusy(); } catch { }
+        try { ResetAllBusyStates(); } catch { }
         this.Closed += MainWindow_Closed;
 
         _toolButtons = new Dictionary<OverlayToolMode, Button>
@@ -1885,9 +1934,40 @@ public partial class MainWindow : Window
     private static bool sNewDbLoaded = false;
     private static string sNewDbSource = "(unbekannt)";
 
-    private static void EnsureNewItemDbLoaded()
+    // Downloads the public Rust item list (id/shortName/displayName/iconUrl) and writes it over the
+    // bundled rust-item-list.json. EnsureNewItemDbLoaded(force: true) then picks it up. Validation
+    // is intentionally loose — we only require it parse as a JSON array containing the two key
+    // fields we actually use. Returns true if the file was rewritten.
+    private static async Task<bool> TryUpdateItemDbAsync()
     {
-        if (sNewDbLoaded) return;
+        const string url = "https://rusthelp.com/downloads/admin-item-list-public.json";
+        try
+        {
+            using var client = new System.Net.Http.HttpClient();
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("RustPlusDesktop-Ryyott/1.0");
+            client.Timeout = TimeSpan.FromSeconds(15);
+
+            var resp = await client.GetAsync(url);
+            if (!resp.IsSuccessStatusCode) return false;
+
+            var json = await resp.Content.ReadAsStringAsync();
+            if (string.IsNullOrWhiteSpace(json) || !json.TrimStart().StartsWith("[")) return false;
+            if (!json.Contains("shortName") || !json.Contains("displayName")) return false;
+
+            string targetPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "rust-item-list.json");
+            var dir = System.IO.Path.GetDirectoryName(targetPath);
+            if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
+                System.IO.Directory.CreateDirectory(dir);
+
+            await System.IO.File.WriteAllTextAsync(targetPath, json);
+            return true;
+        }
+        catch { return false; }
+    }
+
+    private static void EnsureNewItemDbLoaded(bool force = false)
+    {
+        if (sNewDbLoaded && !force) return;
 
         sItemsById.Clear();
         sItemsByShort.Clear();
@@ -3556,6 +3636,8 @@ private sealed record MarkerRef(System.Windows.Shapes.Ellipse Dot, double U_DIP,
             return;
         }
 
+        dev.IsToggling = true;
+
         try
         {
             if (!await EnsureConnectedAsync()) return;
@@ -3598,6 +3680,7 @@ private sealed record MarkerRef(System.Windows.Shapes.Ellipse Dot, double U_DIP,
         finally
         {
             UnmarkToggleBusy(dev.EntityId); // <<< wird garantiert ausgeführt
+            dev.IsToggling = false;
         }
     }
 
@@ -3805,14 +3888,10 @@ private sealed record MarkerRef(System.Windows.Shapes.Ellipse Dot, double U_DIP,
             }
 
             // ab hier gilt sie als "neu"
-            if (m.Text.Trim().Equals("!leader", StringComparison.OrdinalIgnoreCase))
-            {
-                if (m.SteamId != 0 && _rust is RustPlusClientReal client)
-                {
-                    _ = client.PromoteToLeaderAsync(m.SteamId);
-                    AppendLog($"[Auto-Promote] {m.Author} ({m.SteamId}) requested promotion.");
-                }
-            }
+            // Dispatch chat commands (!pop / !time / !cargo / !leader|promote / !switchN).
+            // ChatCommandsEnabled defaults to true on ServerProfile so the legacy !leader behaviour
+            // still works without any config change. Fire-and-forget — never blocks chat rendering.
+            _ = ProcessChatCommands(m);
 
             AppendInlineChat(m);
             
@@ -9418,6 +9497,40 @@ private sealed record MarkerRef(System.Windows.Shapes.Ellipse Dot, double U_DIP,
     private void ClearAllToggleBusy()
     {
         lock (_toggleBusy) { _toggleBusy.Clear(); }
+        // Also clear the per-device visual "in flight" flag so a dropped connection can't strand
+        // any switches in the grayed-out state.
+        try
+        {
+            if (_vm?.Servers != null)
+            {
+                foreach (var srv in _vm.Servers)
+                {
+                    if (srv?.Devices == null) continue;
+                    foreach (var d in srv.Devices) ClearIsTogglingRecursive(d);
+                }
+            }
+        }
+        catch { }
+    }
+
+    private static void ClearIsTogglingRecursive(SmartDevice d)
+    {
+        if (d == null) return;
+        d.IsToggling = false;
+        if (d.Children != null)
+            foreach (var c in d.Children) ClearIsTogglingRecursive(c);
+    }
+
+    // Clears every async-poll re-entrancy flag so a dropped/switched connection can't leave us
+    // permanently "busy". Each poll's own try/finally already clears its flag on the normal path,
+    // but if a cancellation or premature disposal races the in-flight call the flag can leak —
+    // which manifests as "ghost devices" / silent polls after a reconnect. Defensive but cheap.
+    private void ResetAllBusyStates()
+    {
+        System.Threading.Interlocked.Exchange(ref _teamPollBusy, 0);
+        System.Threading.Interlocked.Exchange(ref _camThumbBusy, 0);
+        _storageTickBusy = false;
+        AppendLog("[reset] All busy flags cleared.");
     }
 
     private void BtnHotkeys_Click(object sender, RoutedEventArgs e)

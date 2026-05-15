@@ -172,6 +172,17 @@ public class SmartDevice : INotifyPropertyChanged
         set { if (_isMissing != value) { _isMissing = value; OnProp(); OnProp(nameof(Display)); } }
     }
 
+    // True while a toggle request is in flight. Bound by the toggle button style to gray itself out
+    // and disable further clicks until the API round-trip completes. Always reset in a finally so a
+    // failed/cancelled toggle can't strand the UI in a disabled state.
+    private bool _isToggling;
+    [JsonIgnore]
+    public bool IsToggling
+    {
+        get => _isToggling;
+        set { if (_isToggling != value) { _isToggling = value; OnProp(); } }
+    }
+
     public string? _alias;
     public string? Alias
     {

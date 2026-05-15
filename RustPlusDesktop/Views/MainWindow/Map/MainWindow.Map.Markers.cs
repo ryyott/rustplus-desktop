@@ -1444,6 +1444,16 @@ public partial class MainWindow
                 CenterMapOnWorldAnimated(target.X, target.Y, allowDip: false, fast: true, keepTracking: true);
             }
         }
+        else if (_followingSteamId.HasValue && !_isAnimatingMap)
+        {
+            // Smart Follow Mode — re-center the main map on the chosen teammate every poll.
+            // TeamMembers is the authoritative source for player positions in this fork.
+            var member = TeamMembers.FirstOrDefault(t => t.SteamId == _followingSteamId.Value);
+            if (member != null && member.X.HasValue && member.Y.HasValue)
+            {
+                CenterMapOnWorldAnimated(member.X.Value, member.Y.Value, allowDip: false, fast: true, keepTracking: true);
+            }
+        }
 
         CleanupCargoDockStates();
         UpdateHeliCrashSites();

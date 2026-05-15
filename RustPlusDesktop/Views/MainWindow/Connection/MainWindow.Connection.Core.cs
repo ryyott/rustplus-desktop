@@ -3,6 +3,7 @@ using Microsoft.Web.WebView2.Wpf;
 using RustPlusDesk.Models;
 using RustPlusDesk.Services;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -242,8 +243,6 @@ public partial class MainWindow
             }
             _vm.IsBusy = false;
             _vm.BusyText = "";
-            await LoadMapAsync();
-            await StartPairingListenerUiAsync();
 
             if (TrackingService.AutoLoadShops)
             {
@@ -254,42 +253,41 @@ public partial class MainWindow
             _visibleOverlayOwners.Add(_mySteamId);
             LoadOverlayFromDiskForPlayer(_mySteamId);
 
+            // Phase 1 — synchronous local rehydration. These build the in-memory device/camera
+            // collections from disk; they must run before PrimeDeviceKindsAsync (which probes those
+            // devices) and before any subscription priming.
             RehydrateDevicesFromStorageInto(_vm.Selected);
-            if (real != null && _vm.Selected?.Devices?.Any() == true)
-            {
-                var storageIds = _vm.Selected.Devices
-                    .Where(d => string.Equals(d.Kind, "StorageMonitor", StringComparison.OrdinalIgnoreCase))
-                    .Select(d => d.EntityId)
-                    .ToList();
-
-                if (storageIds.Count > 0)
-                {
-                    try
-                    {
-                        await real.PrimeSubscriptionsAsync(storageIds);
-                        AppendLog($"PrimeSubscriptions: {storageIds.Count} StorageMonitors.");
-                    }
-                    catch (Exception ex)
-                    {
-                        AppendLog("PrimeSubscriptions Error: " + ex.Message);
-                    }
-                }
-            }
-
-            await PrimeDeviceKindsAsync();
-            _vm.NotifyDevicesChanged();
-            AppendLog($"Devices rehydrated: {_vm.Selected.Devices?.Count ?? 0}");
-
             RehydrateCamerasFromStorageInto(_vm.Selected);
             SwitchCameraSourceTo(_vm.Selected);
             AppendLog($"Cams rehydrated: {_vm.Selected.CameraIds?.Count ?? 0}");
 
+            // Phase 2 — kick off the slow network-bound init steps in parallel. Each is independent
+            // (no shared mutable state beyond the VM, which they write to in disjoint regions), and
+            // the cumulative wall time drops from sum(t_i) to max(t_i). Upstream's v4.5.0 commit
+            // 51b5a37 took the same approach after experimenting with sequential variants.
+            var initTasks = new List<Task>
+            {
+                LoadMapAsync(),
+                StartPairingListenerUiAsync(),
+                UpdateServerStatusAsync(),
+                LoadTeamAsync(),
+                PrimeDeviceKindsAsync()
+            };
+            await Task.WhenAll(initTasks);
+
+            _vm.NotifyDevicesChanged();
+            AppendLog($"Devices rehydrated: {_vm.Selected.Devices?.Count ?? 0}");
+
+            // Phase 3 — batched subscription priming covers every paired device in a single call.
+            // Previously this was done twice (StorageMonitors first, then all devices) — the second
+            // call already subsumes the first, so dropping the StorageMonitor-only prime is safe.
             if (real != null && _vm.Selected?.Devices?.Any() == true)
             {
                 try
                 {
-                    await real.PrimeSubscriptionsAsync(_vm.Selected.Devices.Select(d => d.EntityId));
-                    AppendLog($"PrimeSubscriptions: {_vm.Selected.Devices.Count} IDs.");
+                    var allIds = _vm.Selected.Devices.Select(d => d.EntityId).Distinct().ToList();
+                    await real.PrimeSubscriptionsAsync(allIds);
+                    AppendLog($"PrimeSubscriptions: {allIds.Count} entities.");
                 }
                 catch (Exception ex)
                 {
@@ -300,11 +298,9 @@ public partial class MainWindow
             _statusCts?.Cancel();
             _statusCts = new CancellationTokenSource();
             _ = PollServerStatusLoopAsync(_statusCts.Token);
-            await UpdateServerStatusAsync();
             _statusTimer.Start();
 
             StartTeamPolling();
-            await LoadTeamAsync();
             if (_overlayToolsVisible)
             {
                 RebuildOverlayTeamBar();

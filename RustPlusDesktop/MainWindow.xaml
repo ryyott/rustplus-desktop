@@ -1557,6 +1557,10 @@
                                                                     <Setter Property="IsEnabled" Value="False"/>
                                                                     <Setter Property="Opacity" Value="0.4"/>
                                                                 </DataTrigger>
+                                                                <DataTrigger Binding="{Binding IsToggling}" Value="True">
+                                                                    <Setter Property="IsEnabled" Value="False"/>
+                                                                    <Setter Property="Opacity" Value="0.5"/>
+                                                                </DataTrigger>
                                                                 <Trigger Property="IsChecked" Value="True">
                                                                     <Setter Property="Background" Value="SeaGreen"/>
                                                                     <Setter Property="Content" Value="ON"/>
@@ -1850,6 +1854,7 @@
                                 <ListBox.Resources>
                                     <ContextMenu x:Key="TeamContextMenu" Style="{StaticResource DarkContextMenu}">
                                         <MenuItem Header="Center on map" Click="Team_Center_Click"/>
+                                        <MenuItem Header="Follow on map (toggle)" Click="Team_Follow_Click"/>
                                         <MenuItem Header="Open Steam profile" Click="Team_OpenProfile_Click"/>
                                         <Separator/>
                                         <MenuItem Header="Promote to Leader" Click="Team_Promote_Click"/>
